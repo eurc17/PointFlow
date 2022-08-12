@@ -47,6 +47,14 @@ def get_normalized_cloud(pnts, gt_box):
     return pnts
 
 
+def revert_normalized_cloud(pnts, gt_box):
+    pnts = np.concatenate(
+        [single_rotate_points_along_z(pnts[:, :3], gt_box[6]), pnts[:, 3:]], axis=1
+    )
+    pnts[:, :3] += gt_box[:3]
+    return pnts
+
+
 def load_pc_points(pcd_path):
     # return points in numpy array
     pcd = open3d.io.read_point_cloud(pcd_path)
@@ -112,14 +120,12 @@ def crop_points(full_pc_points, oriented_bboxes):
     return obj_point_list
 
 
-def preprocessing(
-    obj_points_list, oriented_bboxes, gt_bboxes_list, resize_flag, rotate_flag
-):
+def preprocessing(obj_points_list, gt_bboxes_list, resize_flag, rotate_flag):
     # normalize (translate to origin and rotate points) object points
 
     norm_obj_points_list = list()
     for i, obj_points in enumerate(obj_points_list):
-        norm_obj_points = get_normalized_cloud(obj_points, gt_bboxes_list)
+        norm_obj_points = get_normalized_cloud(obj_points, gt_bboxes_list[i])
         norm_obj_points_list.append(norm_obj_points)
     # resize point cloud to 1/10 if resize_flag set
     if resize_flag:
@@ -131,7 +137,7 @@ def preprocessing(
 
     # rotate point cloud if rotate_flag set
     if rotate_flag:
-        euler_rot = np.array([-np.pi / 2, 0.0, np.pi / 2])
+        euler_rot = np.array([np.pi / 2, 0.0, 0.0])
         rotation_mat = open3d.geometry.get_rotation_matrix_from_xyz(euler_rot)
         rotated_list = list()
         for i, obj_points in enumerate(norm_obj_points_list):
@@ -139,16 +145,33 @@ def preprocessing(
             rotated_list.append(rotated_obj_points)
         norm_obj_points_list = rotated_list
 
-    return norm_obj_points
+    return norm_obj_points_list
 
 
-def post_processing(
-    obj_points_list, oriented_bboxes, gt_bboxes_list, resize_flag, rotate_flag
-):
-    # todo: rotate to original orientation if rotate flag set
-    # todo: resize back to original size if resize_flag set
-    # todo: place object points back to original location
-    pass
+def post_processing(norm_obj_points_list, gt_bboxes_list, resize_flag, rotate_flag):
+    # rotate to original orientation if rotate flag set
+    norm_obj_points_list
+    if rotate_flag:
+        euler_rot = np.array([-np.pi / 2, 0.0, 0.0])
+        rotation_mat = open3d.geometry.get_rotation_matrix_from_xyz(euler_rot)
+        rotated_list = list()
+        for i, obj_points in enumerate(norm_obj_points_list):
+            rotated_obj_points = rotate_points_by_rot_mat(obj_points, rotation_mat)
+            rotated_list.append(rotated_obj_points)
+        norm_obj_points_list = rotated_list
+    # resize back to original size if resize_flag set
+    if resize_flag:
+        resized_list = list()
+        for obj_points in norm_obj_points_list:
+            resize_obj_points = obj_points * 10.0
+            resized_list.append(resize_obj_points)
+        norm_obj_points_list = resized_list
+    # place object points back to original location
+    obj_points_list = list()
+    for i, obj_points in enumerate(norm_obj_points_list):
+        reverted_obj_points = revert_normalized_cloud(obj_points, gt_bboxes_list[i])
+        obj_points_list.append(reverted_obj_points)
+    return obj_points_list
 
 
 def create_batched_data(processed_point_list):
@@ -158,6 +181,7 @@ def create_batched_data(processed_point_list):
 
 def save_pcd(np_arr_points, output_path):
     # save np_arr_points into pcd file
+    np_arr_points = np_arr_points.reshape(-1, 3)
     vec3d_points = open3d.utility.Vector3dVector(np_arr_points)
     pcd = open3d.geometry.PointCloud(vec3d_points)
     open3d.io.write_point_cloud(output_path, pcd)
@@ -198,13 +222,25 @@ def main(args):
         #     output_path = "{}/{}.pcd".format(args.output_dir, file_stem)
         #     save_pcd(obj_points_accm, output_path)
         processed_point_list = preprocessing(
-            obj_points_list,
-            oriented_bboxes,
-            gt_bboxes_list,
-            args.resize_flag,
-            args.rotate_flag,
+            obj_points_list, gt_bboxes_list, args.resize_flag, args.rotate_flag,
         )
-        # todo: Verify preprocess function
+        # Verify preprocess function
+        # for i, obj_points in enumerate(processed_point_list):
+        #     output_path = "{}/{}_{}.pcd".format(args.output_dir, file_stem, i)
+        #     if len(obj_points) > 0:
+        #         save_pcd(obj_points, output_path)
+        post_processed_point_list = post_processing(
+            processed_point_list, gt_bboxes_list, args.resize_flag, args.rotate_flag
+        )
+        # Verify postprocessing function
+        for i, obj_points in enumerate(post_processed_point_list):
+            if i == 0:
+                obj_points_accm = obj_points
+            else:
+                obj_points_accm = np.concatenate((obj_points_accm, obj_points))
+        if args.output_dir != None:
+            output_path = "{}/{}.pcd".format(args.output_dir, file_stem)
+            save_pcd(obj_points_accm, output_path)
 
 
 if __name__ == "__main__":
