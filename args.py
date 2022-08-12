@@ -339,6 +339,12 @@ def add_args(parser):
         help="To rotate the car to ShapeNet like input or not",
     )
     parser.add_argument(
+        "--mask_flag",
+        default=False,
+        action="store_true",
+        help="To mask points outside of [-10, -9, -3, 42, 13, 2.8] during pcd saving",
+    )
+    parser.add_argument(
         "--output_dir",
         type=str,
         help="The directory to store the point completed point clouds",
