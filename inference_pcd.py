@@ -204,6 +204,7 @@ def main(args):
             args.resize_flag,
             args.rotate_flag,
         )
+        # todo: Verify preprocess function
 
 
 if __name__ == "__main__":
