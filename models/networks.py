@@ -56,7 +56,8 @@ class Encoder(nn.Module):
             ms = F.relu(self.fc_bn1(self.fc1(x)))
             ms = F.relu(self.fc_bn2(self.fc2(ms)))
             ms = self.fc3(ms)
-            m, v = ms, 0
+            m, v = ms, torch.tensor(0, dtype=torch.int64).cuda()  # 0
+            # print(type(m), type(v))
         else:
             m = F.relu(self.fc_bn1_m(self.fc1_m(x)))
             m = F.relu(self.fc_bn2_m(self.fc2_m(m)))
@@ -204,7 +205,7 @@ class PointFlow(nn.Module):
     def decode(self, z, num_points, truncate_std=None):
         # transform points from the prior to a point cloud, conditioned on a shape code
         y = self.sample_gaussian((z.size(0), num_points, self.input_dim), truncate_std)
-        x = self.point_cnf(y, z, reverse=True).view(*y.size())
+        x = self.point_cnf(x=y, context=z, reverse=True).view(*y.size())
         return y, x
 
     def sample(self, batch_size, num_points, truncate_std=None, truncate_std_latent=None, gpu=None):
