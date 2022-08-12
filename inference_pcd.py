@@ -10,6 +10,8 @@ import glob
 import json
 from tqdm import tqdm
 
+class_names = ["Car", "Cyclist", "Truck"]
+
 
 def single_rotate_points_along_z(points, angle):
     """
@@ -71,7 +73,7 @@ def bboxpvrcnn_to_oriented_bboxes(bboxpvrcnn_labels):
     oriented_bboxes = list()
     gt_bboxes_list = list()
     for bboxpvrcnn in bboxpvrcnn_labels:
-        if bboxpvrcnn["class_name"] == "Car":
+        if bboxpvrcnn["class_name"] in class_names:
             # print("Car")
             euler_rot = np.array([0.0, 0.0, float(bboxpvrcnn["heading"])])
             rotation_mat = open3d.geometry.get_rotation_matrix_from_xyz(euler_rot)
@@ -107,6 +109,7 @@ def crop_points(full_pc_points, oriented_bboxes):
     obj_point_list = list()
     # print(full_pc_points.shape)
     vec3d_full_pc_points = open3d.utility.Vector3dVector(full_pc_points)
+    seen_indices = list()
     for oriented_bbox in oriented_bboxes:
         # print(oriented_bbox.get_center())
         # print(oriented_bbox.extent)
@@ -117,7 +120,14 @@ def crop_points(full_pc_points, oriented_bboxes):
         )
         # print(point_indices_in_box)
         obj_point_list.append(full_pc_points[point_indices_in_box])
-    return obj_point_list
+        seen_indices.extend(point_indices_in_box)
+    seen_indices = list(dict.fromkeys(seen_indices))
+    unseen_indices = list()
+    for i in range(len(full_pc_points)):
+        if i not in seen_indices:
+            unseen_indices.append(i)
+
+    return obj_point_list, full_pc_points[unseen_indices]
 
 
 def preprocessing(obj_points_list, gt_bboxes_list, resize_flag, rotate_flag):
@@ -174,14 +184,32 @@ def post_processing(norm_obj_points_list, gt_bboxes_list, resize_flag, rotate_fl
     return obj_points_list
 
 
-def create_batched_data(processed_point_list):
-    # todo: turn processed_point_list of length N into (N, M, 3) torch tensor for model loading
-    pass
+def create_batched_data(obj_points):
+    # turn object_points of length N into (1, N, 3) torch tensor for model loading
+
+    obj_points_accm = obj_points.reshape(1, -1, 3)
+
+    torch_pts = torch.from_numpy(obj_points_accm).float()
+    return torch_pts
 
 
-def save_pcd(np_arr_points, output_path):
+def mask_points_by_range(points, limit_range):
+    mask = (
+        (points[:, 0] >= limit_range[0])
+        & (points[:, 0] <= limit_range[3])
+        & (points[:, 1] >= limit_range[1])
+        & (points[:, 1] <= limit_range[4])
+    )
+    return mask
+
+
+def save_pcd(np_arr_points, output_path, mask_flag=False):
     # save np_arr_points into pcd file
     np_arr_points = np_arr_points.reshape(-1, 3)
+    if mask_flag:
+        pnt_mask = mask_points_by_range(np_arr_points, [-10, -9, -3, 42, 13, 2.8])
+        np_arr_points = np_arr_points[pnt_mask]
+
     vec3d_points = open3d.utility.Vector3dVector(np_arr_points)
     pcd = open3d.geometry.PointCloud(vec3d_points)
     open3d.io.write_point_cloud(output_path, pcd)
@@ -191,6 +219,18 @@ def main(args):
     assert len(glob.glob(args.labels_dir + "/*.json")) == len(
         glob.glob(args.pcd_dir + "/*.pcd")
     ), "Amount of labels does not match the amount of point clouds"
+    # load model
+    model = PointFlow(args)
+
+    def _transform_(m):
+        return nn.DataParallel(m)
+
+    model = model.cuda()
+    model.multi_gpu_wrapper(_transform_)
+    print("Resume Path:%s" % args.resume_checkpoint)
+    checkpoint = torch.load(args.resume_checkpoint)
+    model.load_state_dict(checkpoint)
+    model.eval()
 
     if args.output_dir != None:
         if not os.path.exists(args.output_dir):
@@ -208,9 +248,12 @@ def main(args):
         oriented_bboxes, gt_bboxes_list = bboxpvrcnn_to_oriented_bboxes(
             bboxpvrcnn_labels
         )
-        # print(len(oriented_bboxes))
-        # print(len(bboxpvrcnn_labels))
-        obj_points_list = crop_points(full_pc_points, oriented_bboxes)
+        # if file_stem == "001051":
+        #     print(len(oriented_bboxes))
+        #     print(len(bboxpvrcnn_labels))
+        obj_points_list, background_points = crop_points(
+            full_pc_points, oriented_bboxes
+        )
         assert len(obj_points_list) == len(oriented_bboxes)
         # Verify crop points by saving object points to pcd
         # for i, obj_points in enumerate(obj_points_list):
@@ -229,18 +272,29 @@ def main(args):
         #     output_path = "{}/{}_{}.pcd".format(args.output_dir, file_stem, i)
         #     if len(obj_points) > 0:
         #         save_pcd(obj_points, output_path)
+        output_point_list = list()
+        with torch.no_grad():
+            for object_points in processed_point_list:
+                if len(object_points) > 0:
+                    torch_pts = create_batched_data(object_points)
+                    out_pc = model.reconstruct(
+                        torch_pts, num_points=args.num_sample_points
+                    )
+                    output_obj_points = out_pc.detach().cpu().numpy().reshape(-1, 3)
+                else:
+                    output_obj_points = object_points
+                output_point_list.append(output_obj_points)
+
         post_processed_point_list = post_processing(
-            processed_point_list, gt_bboxes_list, args.resize_flag, args.rotate_flag
+            output_point_list, gt_bboxes_list, args.resize_flag, args.rotate_flag
         )
-        # Verify postprocessing function
-        for i, obj_points in enumerate(post_processed_point_list):
-            if i == 0:
-                obj_points_accm = obj_points
-            else:
-                obj_points_accm = np.concatenate((obj_points_accm, obj_points))
+        obj_points_accm = background_points
+        # Save to pcd
+        for obj_points in post_processed_point_list:
+            obj_points_accm = np.concatenate((obj_points_accm, obj_points))
         if args.output_dir != None:
             output_path = "{}/{}.pcd".format(args.output_dir, file_stem)
-            save_pcd(obj_points_accm, output_path)
+            save_pcd(obj_points_accm, output_path, args.mask_flag)
 
 
 if __name__ == "__main__":
